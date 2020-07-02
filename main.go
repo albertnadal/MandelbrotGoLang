@@ -12,8 +12,8 @@ import (
 )
 
 const MAX_THREADS int32 = 16
-const SCREEN_WIDTH int32 = 1280
-const SCREEN_HEIGHT int32 = 720
+const SCREEN_WIDTH int32 = 1280/3
+const SCREEN_HEIGHT int32 = 720/3
 
 type Mandelbrot struct {
 	ScreenWidth         int32
@@ -30,14 +30,15 @@ type Mandelbrot struct {
 	TotalProcessTime    time.Duration
 	ZoomLevel           float64
 	Canvas              rl.RenderTexture2D
+	MovementOffset      [16]float64
 }
 
 func main() {
 
 	// Ask the Golang runtime how many CPU cores are available
 	totalCores := runtime.NumCPU()
-	fmt.Printf("Total Multi-threaded Cores available: %d\n", totalCores)
-	fmt.Printf("Using %d Cores\n", totalCores)
+	fmt.Printf("- Total Multi-threaded Cores available: %d\n", totalCores)
+	fmt.Printf("- Using %d Cores\n", totalCores)
 	// Set-up the Go runtime to use all the available CPU cores
 	runtime.GOMAXPROCS(totalCores)
 
@@ -46,6 +47,9 @@ func main() {
 
 	fractal := Mandelbrot{}
 	fractal.Init()
+
+	fmt.Printf("\n- Use keys A and S for zoom-in and zoom-out.\n")
+	fmt.Printf("- Use arrow keys to navigate.\n\n")
 
 	for !rl.WindowShouldClose() {
 		fractal.Update()
@@ -124,14 +128,15 @@ func (m *Mandelbrot) Draw() {
 	rl.DrawTexture(m.Canvas.Texture, 0,0, rl.RayWhite)
 
 	raygui.SetStyleProperty(raygui.GlobalTextFontsize, 20.0)
-	raygui.SetStyleProperty(raygui.LabelTextColor, 16448250)
+	raygui.SetStyleProperty(raygui.LabelTextColor, 16448200)
 
 	label_height := 20
 	for thread_index := 0; thread_index < len(m.ThreadsProcessTimes); thread_index++ {
 		raygui.Label(rl.NewRectangle(30, float32(10+thread_index*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Thread: %d) (time: %s)\n", thread_index, m.ThreadsProcessTimes[thread_index]))
 	}
 
-	raygui.Label(rl.NewRectangle(30, float32(10+len(m.ThreadsProcessTimes)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Total time: %s)\n", m.TotalProcessTime))
+	raygui.Label(rl.NewRectangle(30, float32(10+len(m.ThreadsProcessTimes)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Process time: %s)\n", m.TotalProcessTime))
+	raygui.Label(rl.NewRectangle(30, float32(10+(len(m.ThreadsProcessTimes) + 1)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(FPS: %f)\n", rl.GetFPS()))
 
 	rl.EndDrawing()
 }
@@ -139,50 +144,53 @@ func (m *Mandelbrot) Draw() {
 func (m *Mandelbrot) ProcessKeyboard() {
 	m.NeedUpdate = false
 	if rl.IsKeyDown(rl.KeyLeft) {
-		m.PanX -= 0.5/*0.00001*/ / math.Exp2(m.ZoomLevel/1.65)
+		m.PanX -= m.MovementOffset[int(m.ZoomLevel)]
 		m.NeedUpdate = true
 	}
 
 	if rl.IsKeyDown(rl.KeyRight) {
-		m.PanX += 0.5/*0.00001*/ / math.Exp2(m.ZoomLevel/1.65)
+		m.PanX += m.MovementOffset[int(m.ZoomLevel)]
 		m.NeedUpdate = true
 	}
 
 	if rl.IsKeyDown(rl.KeyUp) {
-		m.PanY += 0.5/*0.00001*/ / math.Exp2(m.ZoomLevel/1.65)
+		m.PanY += m.MovementOffset[int(m.ZoomLevel)]
 		m.NeedUpdate = true
 	}
 
 	if rl.IsKeyDown(rl.KeyDown) {
-		m.PanY -= 0.5/*0.00001*/ / math.Exp2(m.ZoomLevel/1.65)
+		m.PanY -= m.MovementOffset[int(m.ZoomLevel)]
 		m.NeedUpdate = true
 	}
 
 	if rl.IsKeyDown(rl.KeyA) {
-		m.ZoomLevel += 0.1
-		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel)
-    m.MaxIterations = 100//12000//6000 + uint32(15.5*m.ZoomLevel)
+		m.ZoomLevel += 0.01
+		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel*3)
+    m.MaxIterations = 80 + 50 * m.ZoomLevel
 		m.NeedUpdate = true
-		fmt.Printf("ZoomLevel. (%f) MaxIterations: (%d) PanX: (%3.40f) PanY: (%3.40f)\n", m.ZoomLevel, m.MaxIterations, m.PanX, m.PanY)
 	}
 
 	if rl.IsKeyDown(rl.KeyS) {
-		m.ZoomLevel -= 0.1
-		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel)
-    m.MaxIterations = 100//12000//6000 + uint32(15.5*m.ZoomLevel)
+		m.ZoomLevel -= 0.01
+		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel*3)
+    m.MaxIterations = 80 + 50 * m.ZoomLevel
 		m.NeedUpdate = true
-		fmt.Printf("ZoomLevel. (%f) MaxIterations: (%f) PanX: (%3.40f) PanY: (%3.40f)\n", m.ZoomLevel, m.MaxIterations, m.PanX, m.PanY)
 	}
 }
 
 func (m *Mandelbrot) Init() {
 	m.ScreenWidth = SCREEN_WIDTH*2
 	m.ScreenHeight = SCREEN_HEIGHT*2
-	m.ZoomLevel = 1//52.9 //1
-	m.MagnificationFactor = 400.0
-	m.MaxIterations = 8192//50
-	m.PanX = 0.1367469998666127062314501472428673878312 //2.0
-	m.PanY = 0.6500099999191820687727272343181539326906 //1.0
+	m.ZoomLevel = 0.1
+	m.MagnificationFactor = 400
+	m.MaxIterations = 80
+	m.PanX = 1.624203
+	m.PanY = 0.620820
+	m.MovementOffset = [...]float64{
+        0.018666, 0.017666, 0.016666, 0.015000,
+        0.002950, 0.000400, 0.000025, 0.0000025,
+        0.00000025, 0.000000025, 0.0000000025, 0.0000000025,
+        0.00000000025, 0.000000000025, 0.0000000000025, 0.00000000000025 }
 	m.NeedUpdate = true
 	m.MaxThreads = MAX_THREADS
 	m.ThreadsProcessTimes = make([]time.Duration, m.MaxThreads)
