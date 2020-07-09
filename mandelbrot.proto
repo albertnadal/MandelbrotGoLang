@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package proto;
+
+service MandelbrotSlaveNode {
+  rpc CalculateRegion (CalculateRegionRequest) returns (CalculateRegionResponse) {}
+}
+
+message CalculateRegionRequest {
+  double MagnificationFactor = 1;
+  double MaxIterations = 2;
+  double PanX = 3;
+  double PanY = 4;
+  int32 RegionWidth = 5;
+  int32 RegionHeight = 6;
+  int32 RegionIndex = 7;
+}
+
+message CalculateRegionResponse {
+  bytes RGBPixels = 1;
+}
