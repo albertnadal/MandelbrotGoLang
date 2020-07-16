@@ -185,9 +185,6 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 		m.RegionWidth = int32(math.Ceil(float64(m.ScreenWidth - 1) / float64(m.SlavesCount + 1)))
 		m.RegionHeight = m.ScreenHeight
 
-		fmt.Printf("REGION WITDH: %d\n", m.RegionWidth)
-		fmt.Printf("REGION HEIGHT: %d\n", m.RegionHeight)
-
 		for c := int32(0); c < m.SlavesCount; c++ {
 			address := fmt.Sprintf("%s:%d", slavesIPs[c], m.SlavePort)
 			fmt.Printf("- Connecting to slave node at %s... ", address)
@@ -220,7 +217,6 @@ func (m *Mandelbrot) Update() {
 	start := time.Now()
 
 	if(m.SlavesCount == 0) {
-
 		// SINGLE COMPUTER
 		for i := int32(0); i < m.MaxThreads; i++ {
 			m.ThreadWaitGroup.Add(1)
@@ -229,7 +225,6 @@ func (m *Mandelbrot) Update() {
 		m.ThreadWaitGroup.Wait()
 
 	} else {
-
 		// DISTRIBUTED COMPUTING
 		regionIndex := int32(0)
 		for regionIndex = 0; regionIndex < m.SlavesCount; regionIndex++ {
@@ -239,7 +234,9 @@ func (m *Mandelbrot) Update() {
 		}
 
 		// Calculate one region locally (master node)
+		start := time.Now()
 		m.CalculateRegionLocally(regionIndex*m.RegionWidth+1, 0, regionIndex*m.RegionWidth+m.RegionWidth, m.RegionHeight)
+		fmt.Printf("(master) (time %s)\n", time.Since(start))
 
 		// Wait for all distributed calculations
 		m.DistributedWaitGroup.Wait()
@@ -254,10 +251,12 @@ func (m *Mandelbrot) CalculateRegionInSlaveNode(region_index int32, x_start int3
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	start := time.Now()
 	response, err := m.SlavesClients[region_index].CalculateRegion(ctx, &proto.CalculateRegionRequest{MagnificationFactor: m.MagnificationFactor, MaxIterations: m.MaxIterations, PanX: m.PanX, PanY: m.PanY, RegionWidth: m.RegionWidth, RegionHeight: m.RegionHeight, RegionIndex: region_index})
 	if err != nil {
 		log.Fatalf("An error occurred when fetching data from slave node (%d) error: (%v)", region_index, err)
 	}
+	fmt.Printf("(slave %d) (time %s)\n", region_index, time.Since(start))
 
 	rgbBuffer := response.GetRGBPixels()
 
