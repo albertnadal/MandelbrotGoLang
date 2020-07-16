@@ -39,9 +39,9 @@ import (
 const DEBUG bool = false
 //const PROFILE bool = false
 
-const MAX_THREADS int32 = 16
-const SCREEN_WIDTH int32 = 1280 / 3
-const SCREEN_HEIGHT int32 = 720 / 3
+const MAX_THREADS int32 = 8
+const SCREEN_WIDTH int32 = 1280 / 2
+const SCREEN_HEIGHT int32 = 720 / 2
 
 type Mandelbrot struct {
 	ScreenWidth          int32
@@ -173,18 +173,20 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 	m.NeedUpdate = true
 	m.MaxThreads = MAX_THREADS
 	m.ThreadsProcessTimes = make([]time.Duration, m.MaxThreads)
-	m.FragmentWidth = (m.ScreenWidth - 1) / m.MaxThreads
+	m.FragmentWidth = int32(math.Ceil(float64(m.ScreenWidth - 1) / float64(m.MaxThreads)))
 	m.FragmentHeight = m.ScreenHeight - 1
 	m.SlavePort = 50051
 	m.IsMaster = isMaster
 
 	if m.IsMaster {
-
 		m.Canvas = rl.LoadRenderTexture(m.ScreenWidth, m.ScreenHeight)
 		m.SlavesCount = int32(len(slavesIPs))
 		m.SlavesClients = make([]proto.MandelbrotSlaveNodeClient, m.SlavesCount)
-		m.RegionWidth = (m.ScreenWidth - 1) / (m.SlavesCount + 1)
-		m.RegionHeight = m.ScreenHeight - 1
+		m.RegionWidth = int32(math.Ceil(float64(m.ScreenWidth - 1) / float64(m.SlavesCount + 1)))
+		m.RegionHeight = m.ScreenHeight
+
+		fmt.Printf("REGION WITDH: %d\n", m.RegionWidth)
+		fmt.Printf("REGION HEIGHT: %d\n", m.RegionHeight)
 
 		for c := int32(0); c < m.SlavesCount; c++ {
 			address := fmt.Sprintf("%s:%d", slavesIPs[c], m.SlavePort)
@@ -222,7 +224,7 @@ func (m *Mandelbrot) Update() {
 		// SINGLE COMPUTER
 		for i := int32(0); i < m.MaxThreads; i++ {
 			m.ThreadWaitGroup.Add(1)
-			go m.CalculateFragmentInThread(i, i*m.FragmentWidth+1, 0, i*m.FragmentWidth+m.FragmentWidth+i, m.FragmentHeight, 0)
+			go m.CalculateFragmentInThread(i, i*m.FragmentWidth, 0, i*m.FragmentWidth+m.FragmentWidth+i, m.FragmentHeight, 0, m.FragmentWidth)
 		}
 		m.ThreadWaitGroup.Wait()
 
@@ -262,46 +264,44 @@ func (m *Mandelbrot) CalculateRegionInSlaveNode(region_index int32, x_start int3
 	var i int32 = 0
 	for x := x_start; (x <= x_end) && (x < m.ScreenWidth); x++ {
 		for y := y_start; y < y_end; y++ {
-				m.Pixels[x][y] = rl.NewColor(rgbBuffer[i*3], rgbBuffer[i*3+1], rgbBuffer[i*3+2], 255) // RGBA
+			m.Pixels[x][y] = rl.NewColor(rgbBuffer[i*3], rgbBuffer[i*3+1], rgbBuffer[i*3+2], 255) // RGBA
 			i++
 		}
 	}
 }
 
 func (m *Mandelbrot) CalculateRegionLocally(x_start int32, y_start int32, x_end int32, y_end int32) {
-	fragmentWidth := (x_end - x_start) / m.MaxThreads
+	regionWidth := x_end - x_start
+	fragmentWidth := int32(math.Ceil(float64(regionWidth) / float64(m.MaxThreads)))
   fragmentHeight := y_end - y_start
 
 	for i := int32(0); i < m.MaxThreads; i++ {
 		m.ThreadWaitGroup.Add(1)
-		go m.CalculateFragmentInThread(i, x_start + i*fragmentWidth + 1, y_start, x_start + i*fragmentWidth + fragmentWidth, fragmentHeight, i*(fragmentWidth+1)*(fragmentHeight+1))
+		go m.CalculateFragmentInThread(i, x_start + i*fragmentWidth, y_start, x_start + i*fragmentWidth + fragmentWidth, fragmentHeight, i*fragmentWidth*fragmentHeight, x_end)
 	}
 
 	m.ThreadWaitGroup.Wait()
 }
 
-func (m *Mandelbrot) CalculateFragmentInThread(thread_index int32, x_start int32, y_start int32, x_end int32, y_end int32, offset int32) {
+func (m *Mandelbrot) CalculateFragmentInThread(thread_index int32, x_start int32, y_start int32, x_end int32, y_end int32, offset int32, x_region_end int32) {
 	defer m.ThreadWaitGroup.Done()
 
 	start := time.Now()
 	var red, green, blue uint8
-	var i int32 = 0;
+	var i int32 = 0
 
-	for x := x_start; (x <= x_end) && (x < m.ScreenWidth); x++ {
-		for y := y_start; y <= y_end; y++ {
+	for x := x_start; (x <= x_end) && (x < x_region_end); x++ {
+		for y := y_start; y < y_end; y++ {
 			//calc_start := time.Now()
 			red, green, blue = m.GetPixelColorAtPosition((float64(x)/m.MagnificationFactor)-m.PanX, (float64(y)/m.MagnificationFactor)-m.PanY)
 			if(m.IsMaster) {
 				// RGBA matrix to draw the fractan and show in the window
 				m.Pixels[x][y] = rl.NewColor(red, green, blue, 255)
 			} else {
-				// RBG buffer used to send to the master node
-				// TODO: remove the following check and fix size calculations
-				if(int32(len(m.RGBBuffer)) > offset*3 + i*3 + 2) {
-					m.RGBBuffer[offset*3 + i*3] = red
-					m.RGBBuffer[offset*3 + i*3 + 1] = green
-					m.RGBBuffer[offset*3 + i*3 + 2] = blue
-				}
+				// RBG buffer used to store the data that should be sent to the master node
+				m.RGBBuffer[offset*3 + i*3] = red
+				m.RGBBuffer[offset*3 + i*3 + 1] = green
+				m.RGBBuffer[offset*3 + i*3 + 2] = blue
 			}
 			i++
 		}
@@ -427,7 +427,7 @@ func (s *MandelbrotSlaveNodeServer) CalculateRegion(ctx context.Context, request
 		s.Mandelbrot.RGBBuffer = make([]byte, s.Mandelbrot.RegionWidth*s.Mandelbrot.RegionHeight*3)
 	}
 
-	s.Mandelbrot.CalculateRegionLocally(regionIndex*s.Mandelbrot.RegionWidth, 0, regionIndex*s.Mandelbrot.RegionWidth+s.Mandelbrot.RegionWidth, s.Mandelbrot.RegionHeight-1)
+	s.Mandelbrot.CalculateRegionLocally(regionIndex*s.Mandelbrot.RegionWidth, 0, regionIndex*s.Mandelbrot.RegionWidth+s.Mandelbrot.RegionWidth, s.Mandelbrot.RegionHeight)
 
 	return &proto.CalculateRegionResponse{RGBPixels: s.Mandelbrot.RGBBuffer}, nil
 }
@@ -439,4 +439,21 @@ func MIN(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func GetClosestDivisibleNumber(n int, m int) int {
+	q := n / m
+	n1 := m * q
+	var n2 int
+	if (n * m) > 0 {
+		n2 = (m * (q + 1))
+	} else {
+		n2 = (m * (q - 1))
+	}
+
+	if (math.Abs(float64(n - n1)) < math.Abs(float64(n - n2))) {
+		return n1
+	}
+
+	return n2
 }
