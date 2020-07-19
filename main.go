@@ -39,9 +39,9 @@ import (
 const DEBUG bool = false
 //const PROFILE bool = false
 
-const MAX_THREADS int32 = 8
-const SCREEN_WIDTH int32 = 1280 / 2
-const SCREEN_HEIGHT int32 = 720 / 2
+const MAX_THREADS int32 = 16
+const SCREEN_WIDTH int32 = 1280
+const SCREEN_HEIGHT int32 = 720
 
 type Mandelbrot struct {
 	ScreenWidth          int32
@@ -170,8 +170,8 @@ func main() {
 // Mandelbrot functions
 
 func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
-	m.ScreenWidth = SCREEN_WIDTH * 2
-	m.ScreenHeight = SCREEN_HEIGHT * 2
+	m.ScreenWidth = SCREEN_WIDTH
+	m.ScreenHeight = SCREEN_HEIGHT
 	m.ZoomLevel = 0.1
 	m.MagnificationFactor = 400
 	m.MaxIterations = 80
@@ -248,7 +248,7 @@ func (m *Mandelbrot) Update() {
 		// SINGLE COMPUTER
 		for i := int32(0); i < m.MaxThreads; i++ {
 			m.ThreadWaitGroup.Add(1)
-			go m.CalculateFragmentInThread(i, i*m.FragmentWidth, 0, i*m.FragmentWidth+m.FragmentWidth+i, m.FragmentHeight, 0, m.FragmentWidth)
+			go m.CalculateFragmentInThread(i, i*m.FragmentWidth, 0, i*m.FragmentWidth+m.FragmentWidth, m.FragmentHeight-1, 0, m.ScreenWidth-1)
 		}
 		m.ThreadWaitGroup.Wait()
 
