@@ -64,11 +64,23 @@ type Mandelbrot struct {
 	SlavePort            int32
 	SlavesClients        []proto.MandelbrotSlaveNodeClient // Used only in 'master' mode
 	SlavesCount          int32
-	RegionWidth          int32
-	RegionHeight         int32
+	NodesProcessTimes    []time.Duration // Array of processing times of each slave node and the master node (last value in the array)
+  NodesRegions         []NodeRegion // Array of regions data assigned to each node
+	BalancedWorkloads    []int32 // Array of values within range [0-100] defining the workload of each slave and the master (last value)
+	// TODO: Eliminar m.FragmentWidth i obtenir els fragmentWidth directament a la funció que pertiqui
 	FragmentWidth        int32
+	// TODO: Eliminar m.FragmentHeight i obtenir els fragmentHeight directament a la funció que pertiqui
 	FragmentHeight       int32
 	RGBBuffer            []byte
+}
+
+type NodeRegion struct {
+	XStart               int32
+	XEnd                 int32
+	YStart               int32
+	YEnd                 int32
+	Width                int32
+	Height               int32
 }
 
 var nodeRole = flag.String("role", "master", "cluster node role: `master` or `slave`")
@@ -182,9 +194,24 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 		m.Canvas = rl.LoadRenderTexture(m.ScreenWidth, m.ScreenHeight)
 		m.SlavesCount = int32(len(slavesIPs))
 		m.SlavesClients = make([]proto.MandelbrotSlaveNodeClient, m.SlavesCount)
-		m.RegionWidth = int32(math.Ceil(float64(m.ScreenWidth - 1) / float64(m.SlavesCount + 1)))
-		m.RegionHeight = m.ScreenHeight
+		m.NodesProcessTimes = make([]time.Duration, m.SlavesCount+1) // processing times for each each slave and the master (last value in array)
+		m.BalancedWorkloads = make([]int32, m.SlavesCount+1) // balanced workloads for each slave and the master (last value in array)
+		m.NodesRegions = make([]NodeRegion, m.SlavesCount+1) // balanced workloads for each slave and the master (last value in array)
 
+		// Set initial relative workload values for each slave node and the master node
+		portion_acc := int32(0)
+		for d := int32(0); d < m.SlavesCount; d++ {
+			workload_portion := 100 / float64(m.SlavesCount+1) //float64(m.SlavesCount + 1)
+			if(d%2 == 0)  {
+				m.BalancedWorkloads[d] = int32(math.Floor(workload_portion))
+			} else {
+				m.BalancedWorkloads[d] = int32(math.Ceil(workload_portion))
+			}
+			portion_acc += m.BalancedWorkloads[d]
+		}
+		m.BalancedWorkloads[m.SlavesCount] = int32(math.Abs(100 - float64(portion_acc))) // master worload
+
+		// Initialize the gRPC client for each slave node
 		for c := int32(0); c < m.SlavesCount; c++ {
 			address := fmt.Sprintf("%s:%d", slavesIPs[c], m.SlavePort)
 			fmt.Printf("- Connecting to slave node at %s... ", address)
@@ -197,6 +224,7 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 		}
 	}
 
+	// Initialize the pixel matrix
 	m.Pixels = make([][]rl.Color, m.ScreenWidth)
 	for i := int32(0); i < m.ScreenWidth; i++ {
 		m.Pixels[i] = make([]rl.Color, m.ScreenHeight)
@@ -227,22 +255,69 @@ func (m *Mandelbrot) Update() {
 	} else {
 		// DISTRIBUTED COMPUTING
 		regionIndex := int32(0)
+
+		// Upload workloads according to previous master and slaves processing times
+		m.UpdateAndBalanceWorkload()
+
+		// Calculate each region separatelly in a slave node identified by 'regionIndex'
 		for regionIndex = 0; regionIndex < m.SlavesCount; regionIndex++ {
-			// Calculate every region remotelly in slave nodes
+			node_region := m.NodesRegions[regionIndex]
 			m.DistributedWaitGroup.Add(1)
-			go m.CalculateRegionInSlaveNode(regionIndex, regionIndex*m.RegionWidth+1, 0, regionIndex*m.RegionWidth + m.RegionWidth, m.RegionHeight)
+			go m.CalculateRegionInSlaveNode(regionIndex, node_region.XStart, node_region.YStart, node_region.XEnd, node_region.YEnd)
 		}
 
 		// Calculate one region locally (master node)
-		start := time.Now()
-		m.CalculateRegionLocally(regionIndex*m.RegionWidth+1, 0, regionIndex*m.RegionWidth+m.RegionWidth, m.RegionHeight)
-		fmt.Printf("(master) (time %s)\n", time.Since(start))
+		master_start := time.Now()
+		node_region := m.NodesRegions[regionIndex]
+		m.CalculateRegionLocally(node_region.XStart, node_region.YStart, node_region.XEnd, node_region.YEnd)
+		m.NodesProcessTimes[regionIndex] = time.Since(master_start) // last item in NodesProcessTimes is used to save the process time of the master node
 
 		// Wait for all distributed calculations
 		m.DistributedWaitGroup.Wait()
 	}
 
 	m.TotalProcessTime = time.Since(start)
+}
+
+func (m *Mandelbrot) UpdateAndBalanceWorkload() {
+	var minProcessTime, maxProcessTime time.Duration = 1*time.Hour, 0
+	var minProcessTimeRegionIndex, maxProcessTimeRegionIndex int32 = 0, 0
+
+	// Search for the fastest and the slowest node
+	for i := int32(0); i <= m.SlavesCount; i++ {
+	    if m.NodesProcessTimes[i] < minProcessTime {
+				minProcessTime = m.NodesProcessTimes[i]
+				minProcessTimeRegionIndex = i
+	    }
+
+			if m.NodesProcessTimes[i] > maxProcessTime {
+				maxProcessTime = m.NodesProcessTimes[i]
+				maxProcessTimeRegionIndex = i
+	    }
+	}
+
+	// Balance the fastest and the slowest node
+	if (m.BalancedWorkloads[minProcessTimeRegionIndex] < 100) && (m.BalancedWorkloads[maxProcessTimeRegionIndex] > 0) && (minProcessTimeRegionIndex != maxProcessTimeRegionIndex) {
+		m.BalancedWorkloads[minProcessTimeRegionIndex]++
+		m.BalancedWorkloads[maxProcessTimeRegionIndex]--
+	}
+
+	fmt.Printf("Nodes workloads: %v\n", m.BalancedWorkloads)
+
+	// Update node regions according to the new workloads calculated
+	x := int32(0)
+	for i := int32(0); i <= m.SlavesCount; i++ {
+		workload := float64(m.BalancedWorkloads[i])/100
+		m.NodesRegions[i].XStart = x
+		m.NodesRegions[i].Width = int32(float64(m.ScreenWidth) * workload)
+		x+=m.NodesRegions[i].Width-1
+		m.NodesRegions[i].XEnd = x
+		x++
+
+		m.NodesRegions[i].YStart = 0
+		m.NodesRegions[i].YEnd = m.ScreenHeight-1
+		m.NodesRegions[i].Height = m.ScreenHeight
+	}
 }
 
 func (m *Mandelbrot) CalculateRegionInSlaveNode(region_index int32, x_start int32, y_start int32, x_end int32, y_end int32) {
@@ -252,17 +327,26 @@ func (m *Mandelbrot) CalculateRegionInSlaveNode(region_index int32, x_start int3
 	defer cancel()
 
 	start := time.Now()
-	response, err := m.SlavesClients[region_index].CalculateRegion(ctx, &proto.CalculateRegionRequest{MagnificationFactor: m.MagnificationFactor, MaxIterations: m.MaxIterations, PanX: m.PanX, PanY: m.PanY, RegionWidth: m.RegionWidth, RegionHeight: m.RegionHeight, RegionIndex: region_index})
+
+	regionWidth := x_end - x_start + 1
+	regionHeight := y_end - y_start + 1
+
+	// Send the job to the slave node with the region to calculate
+	response, err := m.SlavesClients[region_index].CalculateRegion(ctx, &proto.CalculateRegionRequest{MagnificationFactor: m.MagnificationFactor, MaxIterations: m.MaxIterations, PanX: m.PanX, PanY: m.PanY, Index: region_index, Width: regionWidth, Height: regionHeight, XStart: x_start, YStart: y_start, XEnd: x_end, YEnd: y_end})
 	if err != nil {
 		log.Fatalf("An error occurred when fetching data from slave node (%d) error: (%v)", region_index, err)
 	}
-	fmt.Printf("(slave %d) (time %s)\n", region_index, time.Since(start))
 
+	// Save the time spent by slave node to receive, process and return the region calculated
+	m.NodesProcessTimes[region_index] = time.Since(start)
+
+	// RGB buffer with calculated region values(pixels) in RGB
 	rgbBuffer := response.GetRGBPixels()
 
 	var i int32 = 0
 	for x := x_start; (x <= x_end) && (x < m.ScreenWidth); x++ {
 		for y := y_start; y < y_end; y++ {
+			// Update region pixels with the calculated values by the slave node
 			m.Pixels[x][y] = rl.NewColor(rgbBuffer[i*3], rgbBuffer[i*3+1], rgbBuffer[i*3+2], 255) // RGBA
 			i++
 		}
@@ -417,17 +501,19 @@ func (s *MandelbrotSlaveNodeServer) CalculateRegion(ctx context.Context, request
 	s.Mandelbrot.MaxIterations = request.GetMaxIterations()
 	s.Mandelbrot.PanX = request.GetPanX()
 	s.Mandelbrot.PanY = request.GetPanY()
-	s.Mandelbrot.RegionWidth = request.GetRegionWidth()
-	s.Mandelbrot.RegionHeight = request.GetRegionHeight()
-	regionIndex := request.GetRegionIndex()
+	//regionIndex := request.GetIndex()
+	regionWidth := request.GetWidth()
+	regionHeight := request.GetHeight()
+	regionXStart := request.GetXStart()
+	regionXEnd := request.GetXEnd()
+	regionYStart := request.GetYStart()
+	regionYEnd := request.GetYEnd()
 
-	if s.Mandelbrot.RGBBuffer == nil {
-		// Allocate memory for the rgb-pixel buffer used as response
-		s.Mandelbrot.RGBBuffer = make([]byte, s.Mandelbrot.RegionWidth*s.Mandelbrot.RegionHeight*3)
-	}
+  // Following memory allocation is not efficient in terms of performance. Need some improvements.
+	// Allocate memory for the rgb-pixel buffer used as response
+	s.Mandelbrot.RGBBuffer = make([]byte, regionWidth*regionHeight*3)
 
-	s.Mandelbrot.CalculateRegionLocally(regionIndex*s.Mandelbrot.RegionWidth, 0, regionIndex*s.Mandelbrot.RegionWidth+s.Mandelbrot.RegionWidth, s.Mandelbrot.RegionHeight)
-
+	s.Mandelbrot.CalculateRegionLocally(regionXStart, regionYStart, regionXEnd, regionYEnd)
 	return &proto.CalculateRegionResponse{RGBPixels: s.Mandelbrot.RGBBuffer}, nil
 }
 
@@ -438,21 +524,4 @@ func MIN(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func GetClosestDivisibleNumber(n int, m int) int {
-	q := n / m
-	n1 := m * q
-	var n2 int
-	if (n * m) > 0 {
-		n2 = (m * (q + 1))
-	} else {
-		n2 = (m * (q - 1))
-	}
-
-	if (math.Abs(float64(n - n1)) < math.Abs(float64(n - n2))) {
-		return n1
-	}
-
-	return n2
 }

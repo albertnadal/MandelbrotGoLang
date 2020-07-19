@@ -11,9 +11,13 @@ message CalculateRegionRequest {
   double MaxIterations = 2;
   double PanX = 3;
   double PanY = 4;
-  int32 RegionWidth = 5;
-  int32 RegionHeight = 6;
-  int32 RegionIndex = 7;
+  int32 Index = 5;
+  int32 XStart = 6;
+  int32 XEnd = 7;
+  int32 YStart = 8;
+  int32 YEnd = 9;
+  int32 Width = 10;
+  int32 Height = 11;
 }
 
 message CalculateRegionResponse {
