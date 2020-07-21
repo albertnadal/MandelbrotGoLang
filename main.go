@@ -16,99 +16,75 @@ go run main.go --role=slave
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"context"
 	"github.com/gen2brain/raylib-go/raygui"
 	"github.com/gen2brain/raylib-go/raylib"
 	"github.com/lucasb-eyer/go-colorful"
 	"google.golang.org/grpc"
-	//"google.golang.org/grpc/keepalive"
 	"log"
+	"mandelbrot-fractal/proto"
 	"math"
-	//"os"
 	"net"
 	"runtime"
-	//"runtime/pprof"
 	"strings"
 	"sync"
 	"time"
-	"mandelbrot-fractal/proto"
 )
 
-const DEBUG bool = false
-//const PROFILE bool = false
-
 const MAX_THREADS int32 = 16
-const SCREEN_WIDTH int32 = 1440
-const SCREEN_HEIGHT int32 = 900
+const SCREEN_WIDTH int32 = 1280
+const SCREEN_HEIGHT int32 = 720
 
 type Mandelbrot struct {
-	ScreenWidth          int32
-	ScreenHeight         int32
-	Pixels               []rl.Color
-	MagnificationFactor  float64
-	MaxIterations        float64
-	PanX                 float64
-	PanY                 float64
-	ThreadWaitGroup      sync.WaitGroup
-	DistributedWaitGroup sync.WaitGroup
-	NeedUpdate           bool
-	MaxThreads           int32
-	ThreadsProcessTimes  []time.Duration
-	TotalProcessTime     time.Duration
-	ZoomLevel            float64
-	Canvas               rl.RenderTexture2D
-	MovementOffset       [16]float64
-	IsMaster             bool
-	SlavePort            int32
-	SlavesClients        []proto.MandelbrotSlaveNodeClient // Used only in 'master' mode
-	SlavesCount          int32
-	NodesProcessTimes    []time.Duration // Array of processing times of each slave node and the master node (last value in the array)
-  NodesRegions         []NodeRegion // Array of regions data assigned to each node
-	BalancedWorkloads    []int32 // Array of values within range [0-100] defining the workload of each slave and the master (last value)
-	// TODO: Eliminar m.FragmentWidth i obtenir els fragmentWidth directament a la funció que pertiqui
-	FragmentWidth        int32
-	// TODO: Eliminar m.FragmentHeight i obtenir els fragmentHeight directament a la funció que pertiqui
-	FragmentHeight       int32
-	RGBBuffer            []byte
+	ScreenWidth              int32
+	ScreenHeight             int32
+	Pixels                   []rl.Color
+	MagnificationFactor      float64
+	MaxIterations            float64
+	PanX                     float64
+	PanY                     float64
+	ThreadWaitGroup          sync.WaitGroup
+	DistributedWaitGroup     sync.WaitGroup
+	NeedUpdate               bool
+	MaxLocalThreads          int32
+	LocalThreadsProcessTimes []time.Duration
+	FrameProcessTime         time.Duration
+	ZoomLevel                float64
+	Canvas                   rl.RenderTexture2D
+	MovementOffset           [16]float64
+	IsMaster                 bool
+	SlavePort                int32
+	SlavesClients            []proto.MandelbrotSlaveNodeClient // Used only in 'master' mode
+	SlavesCount              int32
+	NodesProcessTimes        []time.Duration   // Array of processing times of each slave node and the master node (last value in the array)
+	NodesRegions             []NodeRegion      // Array of regions data assigned to each node
+	NodesThreadsProcessTimes [][]time.Duration // Thread processing times of all slave nodes
+	BalancedWorkloads        []int32           // Array of values within range [0-100] defining the workload of each slave and the master (last value)
+	FragmentWidth            int32
+	FragmentHeight           int32
+	RGBBuffer                []byte
 }
 
 type NodeRegion struct {
-	XStart               int32
-	XEnd                 int32
-	YStart               int32
-	YEnd                 int32
-	Width                int32
-	Height               int32
+	XStart int32
+	XEnd   int32
+	YStart int32
+	YEnd   int32
+	Width  int32
+	Height int32
 }
 
 var nodeRole = flag.String("role", "master", "cluster node role: `master` or `slave`")
 var slavesIPs = flag.String("slaves", "", "cluster node slaves IP's separated by comas")
-//var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
-//var memprofile = flag.String("memprofile", "", "write memory profile to `file`")
 
 func main() {
-
 	flag.Parse()
-
-/*	if PROFILE {
-		if *cpuprofile != "" {
-			f, err := os.Create(*cpuprofile)
-			if err != nil {
-				log.Fatal("could not create CPU profile: ", err)
-			}
-			defer f.Close()
-			if err := pprof.StartCPUProfile(f); err != nil {
-				log.Fatal("could not start CPU profile: ", err)
-			}
-			defer pprof.StopCPUProfile()
-		}
-	}*/
 
 	// Ask the Golang runtime how many CPU cores are available
 	totalCores := runtime.NumCPU()
-	isMaster := (*nodeRole != "slave")
+	isMaster := *nodeRole != "slave"
 	fmt.Printf("\n- Multi-threaded cores available: %d\n", totalCores)
 	fmt.Printf("- Using %d cores\n", totalCores)
 	var slaves []string
@@ -150,21 +126,6 @@ func main() {
 	} else {
 		fractal.ProcessRequestsFromMasterNode()
 	}
-/*
-	if PROFILE {
-		if *memprofile != "" {
-			f, err := os.Create(*memprofile)
-			if err != nil {
-				log.Fatal("could not create memory profile: ", err)
-			}
-			defer f.Close()
-			runtime.GC() // get up-to-date statistics
-			if err := pprof.WriteHeapProfile(f); err != nil {
-				log.Fatal("could not write memory profile: ", err)
-			}
-		}
-	}
-*/
 }
 
 // Mandelbrot functions
@@ -183,9 +144,9 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 		0.00000025, 0.000000025, 0.0000000025, 0.0000000025,
 		0.00000000025, 0.000000000025, 0.0000000000025, 0.00000000000025}
 	m.NeedUpdate = true
-	m.MaxThreads = MAX_THREADS
-	m.ThreadsProcessTimes = make([]time.Duration, m.MaxThreads)
-	m.FragmentWidth = int32(math.Ceil(float64(m.ScreenWidth - 1) / float64(m.MaxThreads)))
+	m.MaxLocalThreads = MAX_THREADS
+	m.LocalThreadsProcessTimes = make([]time.Duration, m.MaxLocalThreads)
+	m.FragmentWidth = int32(math.Ceil(float64(m.ScreenWidth-1) / float64(m.MaxLocalThreads)))
 	m.FragmentHeight = m.ScreenHeight - 1
 	m.SlavePort = 50051
 	m.IsMaster = isMaster
@@ -194,7 +155,14 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 		m.Canvas = rl.LoadRenderTexture(m.ScreenWidth, m.ScreenHeight)
 		m.SlavesCount = int32(len(slavesIPs))
 		m.SlavesClients = make([]proto.MandelbrotSlaveNodeClient, m.SlavesCount)
-		m.NodesProcessTimes = make([]time.Duration, m.SlavesCount+1) // processing times for each each slave and the master (last value in array)
+		m.NodesProcessTimes = make([]time.Duration, m.SlavesCount+1)        // processing times for each each slave and the master (last value in array)
+		m.NodesThreadsProcessTimes = make([][]time.Duration, m.SlavesCount) // thread processing times of all nodes in the cluster (slaves and master)
+
+		// This array stores all thread processing times of all slave nodes
+		for i := int32(0); i < m.SlavesCount; i++ {
+			m.NodesThreadsProcessTimes[i] = make([]time.Duration, m.MaxLocalThreads)
+		}
+
 		m.BalancedWorkloads = make([]int32, m.SlavesCount+1) // balanced workloads for each slave and the master (last value in array)
 		m.NodesRegions = make([]NodeRegion, m.SlavesCount+1) // balanced workloads for each slave and the master (last value in array)
 
@@ -202,7 +170,7 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 		portion_acc := int32(0)
 		for d := int32(0); d < m.SlavesCount; d++ {
 			workload_portion := 100 / float64(m.SlavesCount+1) //float64(m.SlavesCount + 1)
-			if(d%2 == 0)  {
+			if d%2 == 0 {
 				m.BalancedWorkloads[d] = int32(math.Floor(workload_portion))
 			} else {
 				m.BalancedWorkloads[d] = int32(math.Ceil(workload_portion))
@@ -238,9 +206,9 @@ func (m *Mandelbrot) Update() {
 
 	start := time.Now()
 
-	if(m.SlavesCount == 0) {
+	if m.SlavesCount == 0 {
 		// SINGLE COMPUTER
-		for i := int32(0); i < m.MaxThreads; i++ {
+		for i := int32(0); i < m.MaxLocalThreads; i++ {
 			m.ThreadWaitGroup.Add(1)
 			go m.CalculateFragmentInThread(i, i*m.FragmentWidth, 0, i*m.FragmentWidth+m.FragmentWidth, m.FragmentHeight-1, 0, m.ScreenWidth-1)
 		}
@@ -270,7 +238,7 @@ func (m *Mandelbrot) Update() {
 		m.DistributedWaitGroup.Wait()
 	}
 
-	m.TotalProcessTime = time.Since(start)
+	m.FrameProcessTime = time.Since(start)
 }
 
 func (m *Mandelbrot) Draw() {
@@ -283,16 +251,28 @@ func (m *Mandelbrot) Draw() {
 	// Render texture in GPU to screen
 	rl.DrawTexture(m.Canvas.Texture, 0, 0, rl.RayWhite)
 
-	raygui.SetStyleProperty(raygui.GlobalTextFontsize, 16.0)
-	raygui.SetStyleProperty(raygui.LabelTextColor, 16448200)
+	raygui.SetStyleProperty(raygui.GlobalTextFontsize, 14.0)
+	raygui.SetStyleProperty(raygui.GlobalTextColor, 9999999)
 
-	label_height := 20
-	for thread_index := 0; thread_index < len(m.ThreadsProcessTimes); thread_index++ {
-		raygui.Label(rl.NewRectangle(30, float32(10+thread_index*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Thread: %d) (time: %s)\n", thread_index, m.ThreadsProcessTimes[thread_index]))
+	label_height := 14
+	// Show master node threads processing times
+	raygui.Label(rl.NewRectangle(0, 8, 40, float32(label_height)), fmt.Sprintf("MASTER\n"))
+	for thread_index := 0; thread_index < len(m.LocalThreadsProcessTimes); thread_index++ {
+		raygui.Label(rl.NewRectangle(0, float32(20+8+thread_index*(label_height+8)), 100, float32(label_height)), fmt.Sprintf("Thread %d: %s\n", thread_index, m.LocalThreadsProcessTimes[thread_index]))
 	}
 
-	raygui.Label(rl.NewRectangle(30, float32(10+len(m.ThreadsProcessTimes)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Process time: %s)\n", m.TotalProcessTime))
-	raygui.Label(rl.NewRectangle(30, float32(10+(len(m.ThreadsProcessTimes)+1)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(FPS: %f)\n", rl.GetFPS()))
+	// Show slave nodes threads processing times
+	for region_index := 0; region_index < len(m.NodesThreadsProcessTimes); region_index++ {
+		raygui.Label(rl.NewRectangle(float32(region_index+1)*160, 8, 40, float32(label_height)), fmt.Sprintf("NODE %d\n", region_index))
+		for thread_index := 0; thread_index < len(m.NodesThreadsProcessTimes[region_index]); thread_index++ {
+			raygui.Label(rl.NewRectangle(float32(region_index+1)*160, float32(20+8+thread_index*(label_height+8)), 100, float32(label_height)), fmt.Sprintf("Thread %d: %s\n", thread_index, m.LocalThreadsProcessTimes[thread_index]))
+		}
+	}
+
+	// Show frame total processing time and rendering FPS
+	raygui.Label(rl.NewRectangle(0, float32(m.ScreenHeight-40), 100, float32(label_height)), fmt.Sprintf("(Frame time: %s)\n", m.FrameProcessTime))
+	raygui.Label(rl.NewRectangle(0, float32(m.ScreenHeight-20), 100, float32(label_height)), fmt.Sprintf("(FPS: %f)\n", rl.GetFPS()))
+
 	rl.EndDrawing()
 }
 
@@ -334,20 +314,20 @@ func (m *Mandelbrot) ProcessKeyboard() {
 }
 
 func (m *Mandelbrot) UpdateAndBalanceWorkload() {
-	var minProcessTime, maxProcessTime time.Duration = 1*time.Hour, 0
+	var minProcessTime, maxProcessTime time.Duration = 1 * time.Hour, 0
 	var minProcessTimeRegionIndex, maxProcessTimeRegionIndex int32 = 0, 0
 
 	// Search for the fastest and the slowest node
 	for i := int32(0); i <= m.SlavesCount; i++ {
-	    if m.NodesProcessTimes[i] < minProcessTime {
-				minProcessTime = m.NodesProcessTimes[i]
-				minProcessTimeRegionIndex = i
-	    }
+		if m.NodesProcessTimes[i] < minProcessTime {
+			minProcessTime = m.NodesProcessTimes[i]
+			minProcessTimeRegionIndex = i
+		}
 
-			if m.NodesProcessTimes[i] > maxProcessTime {
-				maxProcessTime = m.NodesProcessTimes[i]
-				maxProcessTimeRegionIndex = i
-	    }
+		if m.NodesProcessTimes[i] > maxProcessTime {
+			maxProcessTime = m.NodesProcessTimes[i]
+			maxProcessTimeRegionIndex = i
+		}
 	}
 
 	// Balance the fastest and the slowest node
@@ -356,26 +336,24 @@ func (m *Mandelbrot) UpdateAndBalanceWorkload() {
 		m.BalancedWorkloads[maxProcessTimeRegionIndex]--
 	}
 
-	fmt.Printf("Nodes workloads: %v\n", m.BalancedWorkloads)
-
 	// Update node regions according to the new workloads calculated
 	x := int32(0)
 	for i := int32(0); i <= m.SlavesCount; i++ {
-		workload := float64(m.BalancedWorkloads[i])/100
+		workload := float64(m.BalancedWorkloads[i]) / 100
 		m.NodesRegions[i].XStart = x
 		m.NodesRegions[i].Width = int32(float64(m.ScreenWidth) * workload)
-		x+=m.NodesRegions[i].Width-1
+		x += m.NodesRegions[i].Width - 1
 		m.NodesRegions[i].XEnd = x
 		x++
 
 		m.NodesRegions[i].YStart = 0
-		m.NodesRegions[i].YEnd = m.ScreenHeight-1
+		m.NodesRegions[i].YEnd = m.ScreenHeight - 1
 		m.NodesRegions[i].Height = m.ScreenHeight
 	}
 }
 
 func (m *Mandelbrot) CalculateRegionInSlaveNode(region_index int32, x_start int32, y_start int32, x_end int32, y_end int32) {
-  defer m.DistributedWaitGroup.Done()
+	defer m.DistributedWaitGroup.Done()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -396,25 +374,32 @@ func (m *Mandelbrot) CalculateRegionInSlaveNode(region_index int32, x_start int3
 
 	// RGB buffer with calculated region values(pixels) in RGB
 	rgbBuffer := response.GetRGBPixels()
+	slaveThreadsProcessTimesInt64 := response.GetThreadsProcessTimes()
 
+	// Update local buffer with the region calculated in a slave node
 	var i int32 = 0
 	for x := x_start; (x <= x_end) && (x < m.ScreenWidth); x++ {
 		for y := y_start; y < y_end; y++ {
 			// Update region pixels with the calculated values by the slave node
-			m.Pixels[(m.ScreenWidth*y) + x] = rl.NewColor(rgbBuffer[i*3], rgbBuffer[i*3+1], rgbBuffer[i*3+2], 255) // RGBA
+			m.Pixels[(m.ScreenWidth*y)+x] = rl.NewColor(rgbBuffer[i*3], rgbBuffer[i*3+1], rgbBuffer[i*3+2], 255) // RGBA
 			i++
 		}
+	}
+
+	// Store slave node threads processing times (used only to show node stats)
+	for e := int32(0); e < m.MaxLocalThreads; e++ {
+		m.NodesThreadsProcessTimes[region_index][e] = time.Duration(slaveThreadsProcessTimesInt64[e]) * time.Nanosecond
 	}
 }
 
 func (m *Mandelbrot) CalculateRegionLocally(x_start int32, y_start int32, x_end int32, y_end int32) {
 	regionWidth := x_end - x_start
-	fragmentWidth := int32(math.Ceil(float64(regionWidth) / float64(m.MaxThreads)))
-  fragmentHeight := y_end - y_start
+	fragmentWidth := int32(math.Ceil(float64(regionWidth) / float64(m.MaxLocalThreads)))
+	fragmentHeight := y_end - y_start
 
-	for i := int32(0); i < m.MaxThreads; i++ {
+	for i := int32(0); i < m.MaxLocalThreads; i++ {
 		m.ThreadWaitGroup.Add(1)
-		go m.CalculateFragmentInThread(i, x_start + i*fragmentWidth, y_start, x_start + i*fragmentWidth + fragmentWidth, fragmentHeight, i*fragmentWidth*fragmentHeight, x_end)
+		go m.CalculateFragmentInThread(i, x_start+i*fragmentWidth, y_start, x_start+i*fragmentWidth+fragmentWidth, fragmentHeight, i*fragmentWidth*fragmentHeight, x_end)
 	}
 
 	m.ThreadWaitGroup.Wait()
@@ -430,19 +415,19 @@ func (m *Mandelbrot) CalculateFragmentInThread(thread_index int32, x_start int32
 	for x := x_start; (x <= x_end) && (x < x_region_end); x++ {
 		for y := y_start; y < y_end; y++ {
 			red, green, blue = m.GetPixelColorAtPosition((float64(x)/m.MagnificationFactor)-m.PanX, (float64(y)/m.MagnificationFactor)-m.PanY)
-			if(m.IsMaster) {
+			if m.IsMaster {
 				// RGBA buffer that will be sent to the GPU in order to draw the fractal in the screen
-				m.Pixels[(m.ScreenWidth*y) + x] = rl.NewColor(red, green, blue, 255)
+				m.Pixels[(m.ScreenWidth*y)+x] = rl.NewColor(red, green, blue, 255)
 			} else {
 				// RBG buffer used to store the data that should be sent to the master node
-				m.RGBBuffer[offset*3 + i*3] = red
-				m.RGBBuffer[offset*3 + i*3 + 1] = green
-				m.RGBBuffer[offset*3 + i*3 + 2] = blue
+				m.RGBBuffer[offset*3+i*3] = red
+				m.RGBBuffer[offset*3+i*3+1] = green
+				m.RGBBuffer[offset*3+i*3+2] = blue
 				i++
 			}
 		}
 	}
-	m.ThreadsProcessTimes[thread_index] = time.Since(start)
+	m.LocalThreadsProcessTimes[thread_index] = time.Since(start)
 }
 
 func (m *Mandelbrot) GetPixelColorAtPosition(x float64, y float64) (uint8, uint8, uint8) {
@@ -457,7 +442,7 @@ func (m *Mandelbrot) GetPixelColorAtPosition(x float64, y float64) (uint8, uint8
 
 		if realComponent*imaginaryComponent > 5 {
 			colorHSV := colorful.Hsv(i*360/m.MaxIterations, 0.98, 0.922) // hue bar color (Hsv)
-			return uint8(colorHSV.R*255), uint8(colorHSV.G*255), uint8(colorHSV.B*255)
+			return uint8(colorHSV.R * 255), uint8(colorHSV.G * 255), uint8(colorHSV.B * 255)
 		}
 	}
 
@@ -486,12 +471,10 @@ type MandelbrotSlaveNodeServer struct {
 }
 
 func (s *MandelbrotSlaveNodeServer) CalculateRegion(ctx context.Context, request *proto.CalculateRegionRequest) (*proto.CalculateRegionResponse, error) {
-
 	s.Mandelbrot.MagnificationFactor = request.GetMagnificationFactor()
 	s.Mandelbrot.MaxIterations = request.GetMaxIterations()
 	s.Mandelbrot.PanX = request.GetPanX()
 	s.Mandelbrot.PanY = request.GetPanY()
-	//regionIndex := request.GetIndex()
 	regionWidth := request.GetWidth()
 	regionHeight := request.GetHeight()
 	regionXStart := request.GetXStart()
@@ -499,12 +482,18 @@ func (s *MandelbrotSlaveNodeServer) CalculateRegion(ctx context.Context, request
 	regionYStart := request.GetYStart()
 	regionYEnd := request.GetYEnd()
 
-  // Following memory allocation is not efficient in terms of performance. Need some improvements.
+	// Following memory allocation is not efficient at all in terms of performance. Need some improvements.
 	// Allocate memory for the rgb-pixel buffer used as response
 	s.Mandelbrot.RGBBuffer = make([]byte, regionWidth*regionHeight*3)
 
 	s.Mandelbrot.CalculateRegionLocally(regionXStart, regionYStart, regionXEnd, regionYEnd)
-	return &proto.CalculateRegionResponse{RGBPixels: s.Mandelbrot.RGBBuffer}, nil
+
+	localThreadsProcessTimesInt64 := make([]int64, s.Mandelbrot.MaxLocalThreads)
+	for i := int32(0); i < s.Mandelbrot.MaxLocalThreads; i++ {
+		localThreadsProcessTimesInt64[i] = s.Mandelbrot.LocalThreadsProcessTimes[i].Nanoseconds()
+	}
+
+	return &proto.CalculateRegionResponse{RGBPixels: s.Mandelbrot.RGBBuffer, ThreadsProcessTimes: localThreadsProcessTimesInt64}, nil
 }
 
 // Other functions

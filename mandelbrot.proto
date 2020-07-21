@@ -22,4 +22,5 @@ message CalculateRegionRequest {
 
 message CalculateRegionResponse {
   bytes RGBPixels = 1;
+  repeated int64 ThreadsProcessTimes = 2 [packed=true];
 }
