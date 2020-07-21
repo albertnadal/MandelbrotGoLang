@@ -40,13 +40,13 @@ const DEBUG bool = false
 //const PROFILE bool = false
 
 const MAX_THREADS int32 = 16
-const SCREEN_WIDTH int32 = 1280
-const SCREEN_HEIGHT int32 = 720
+const SCREEN_WIDTH int32 = 1440
+const SCREEN_HEIGHT int32 = 900
 
 type Mandelbrot struct {
 	ScreenWidth          int32
 	ScreenHeight         int32
-	Pixels               [][]rl.Color
+	Pixels               []rl.Color
 	MagnificationFactor  float64
 	MaxIterations        float64
 	PanX                 float64
@@ -225,15 +225,9 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 	}
 
 	// Initialize the pixel matrix
-	m.Pixels = make([][]rl.Color, m.ScreenWidth)
-	for i := int32(0); i < m.ScreenWidth; i++ {
-		m.Pixels[i] = make([]rl.Color, m.ScreenHeight)
-	}
-
-	for x := int32(0); x < m.ScreenWidth; x++ {
-		for y := int32(0); y < m.ScreenHeight; y++ {
-			m.Pixels[x][y] = rl.NewColor(0, 0, 0, 255)
-		}
+	m.Pixels = make([]rl.Color, m.ScreenWidth*m.ScreenHeight)
+	for i := int32(0); i < int32(len(m.Pixels)); i++ {
+		m.Pixels[i] = rl.NewColor(0, 0, 0, 255)
 	}
 }
 
@@ -277,6 +271,66 @@ func (m *Mandelbrot) Update() {
 	}
 
 	m.TotalProcessTime = time.Since(start)
+}
+
+func (m *Mandelbrot) Draw() {
+	rl.BeginDrawing()
+	rl.ClearBackground(rl.Black)
+
+	// Send updated texture from RAM to GPU
+	rl.UpdateTexture(m.Canvas.Texture, m.Pixels)
+
+	// Render texture in GPU to screen
+	rl.DrawTexture(m.Canvas.Texture, 0, 0, rl.RayWhite)
+
+	raygui.SetStyleProperty(raygui.GlobalTextFontsize, 16.0)
+	raygui.SetStyleProperty(raygui.LabelTextColor, 16448200)
+
+	label_height := 20
+	for thread_index := 0; thread_index < len(m.ThreadsProcessTimes); thread_index++ {
+		raygui.Label(rl.NewRectangle(30, float32(10+thread_index*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Thread: %d) (time: %s)\n", thread_index, m.ThreadsProcessTimes[thread_index]))
+	}
+
+	raygui.Label(rl.NewRectangle(30, float32(10+len(m.ThreadsProcessTimes)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Process time: %s)\n", m.TotalProcessTime))
+	raygui.Label(rl.NewRectangle(30, float32(10+(len(m.ThreadsProcessTimes)+1)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(FPS: %f)\n", rl.GetFPS()))
+	rl.EndDrawing()
+}
+
+func (m *Mandelbrot) ProcessKeyboard() {
+	m.NeedUpdate = false
+	if rl.IsKeyDown(rl.KeyLeft) {
+		m.PanX -= m.MovementOffset[int(m.ZoomLevel)]
+		m.NeedUpdate = true
+	}
+
+	if rl.IsKeyDown(rl.KeyRight) {
+		m.PanX += m.MovementOffset[int(m.ZoomLevel)]
+		m.NeedUpdate = true
+	}
+
+	if rl.IsKeyDown(rl.KeyUp) {
+		m.PanY -= m.MovementOffset[int(m.ZoomLevel)]
+		m.NeedUpdate = true
+	}
+
+	if rl.IsKeyDown(rl.KeyDown) {
+		m.PanY += m.MovementOffset[int(m.ZoomLevel)]
+		m.NeedUpdate = true
+	}
+
+	if rl.IsKeyDown(rl.KeyA) {
+		m.ZoomLevel += 0.01
+		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel*3)
+		m.MaxIterations = 80 + 50*m.ZoomLevel
+		m.NeedUpdate = true
+	}
+
+	if rl.IsKeyDown(rl.KeyS) {
+		m.ZoomLevel -= 0.01
+		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel*3)
+		m.MaxIterations = 80 + 50*m.ZoomLevel
+		m.NeedUpdate = true
+	}
 }
 
 func (m *Mandelbrot) UpdateAndBalanceWorkload() {
@@ -347,7 +401,7 @@ func (m *Mandelbrot) CalculateRegionInSlaveNode(region_index int32, x_start int3
 	for x := x_start; (x <= x_end) && (x < m.ScreenWidth); x++ {
 		for y := y_start; y < y_end; y++ {
 			// Update region pixels with the calculated values by the slave node
-			m.Pixels[x][y] = rl.NewColor(rgbBuffer[i*3], rgbBuffer[i*3+1], rgbBuffer[i*3+2], 255) // RGBA
+			m.Pixels[(m.ScreenWidth*y) + x] = rl.NewColor(rgbBuffer[i*3], rgbBuffer[i*3+1], rgbBuffer[i*3+2], 255) // RGBA
 			i++
 		}
 	}
@@ -375,18 +429,17 @@ func (m *Mandelbrot) CalculateFragmentInThread(thread_index int32, x_start int32
 
 	for x := x_start; (x <= x_end) && (x < x_region_end); x++ {
 		for y := y_start; y < y_end; y++ {
-			//calc_start := time.Now()
 			red, green, blue = m.GetPixelColorAtPosition((float64(x)/m.MagnificationFactor)-m.PanX, (float64(y)/m.MagnificationFactor)-m.PanY)
 			if(m.IsMaster) {
-				// RGBA matrix to draw the fractan and show in the window
-				m.Pixels[x][y] = rl.NewColor(red, green, blue, 255)
+				// RGBA buffer that will be sent to the GPU in order to draw the fractal in the screen
+				m.Pixels[(m.ScreenWidth*y) + x] = rl.NewColor(red, green, blue, 255)
 			} else {
 				// RBG buffer used to store the data that should be sent to the master node
 				m.RGBBuffer[offset*3 + i*3] = red
 				m.RGBBuffer[offset*3 + i*3 + 1] = green
 				m.RGBBuffer[offset*3 + i*3 + 2] = blue
+				i++
 			}
-			i++
 		}
 	}
 	m.ThreadsProcessTimes[thread_index] = time.Since(start)
@@ -409,69 +462,6 @@ func (m *Mandelbrot) GetPixelColorAtPosition(x float64, y float64) (uint8, uint8
 	}
 
 	return 0, 0, 0 //black
-}
-
-func (m *Mandelbrot) Draw() {
-	rl.BeginDrawing()
-	rl.ClearBackground(rl.Black)
-	rl.BeginTextureMode(m.Canvas)
-	for x := int32(0); x < m.ScreenWidth; x++ {
-		for y := int32(0); y < m.ScreenHeight; y++ {
-			rl.DrawPixel(x, y, m.Pixels[x][y])
-		}
-	}
-	rl.EndTextureMode()
-	rl.DrawTexture(m.Canvas.Texture, 0, 0, rl.RayWhite)
-
-	raygui.SetStyleProperty(raygui.GlobalTextFontsize, 20.0)
-	raygui.SetStyleProperty(raygui.LabelTextColor, 16448200)
-
-	label_height := 20
-	for thread_index := 0; thread_index < len(m.ThreadsProcessTimes); thread_index++ {
-		raygui.Label(rl.NewRectangle(30, float32(10+thread_index*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Thread: %d) (time: %s)\n", thread_index, m.ThreadsProcessTimes[thread_index]))
-	}
-
-	raygui.Label(rl.NewRectangle(30, float32(10+len(m.ThreadsProcessTimes)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(Process time: %s)\n", m.TotalProcessTime))
-	raygui.Label(rl.NewRectangle(30, float32(10+(len(m.ThreadsProcessTimes)+1)*(label_height+10)), 200, float32(label_height)), fmt.Sprintf("(FPS: %f)\n", rl.GetFPS()))
-
-	rl.EndDrawing()
-}
-
-func (m *Mandelbrot) ProcessKeyboard() {
-	m.NeedUpdate = false
-	if rl.IsKeyDown(rl.KeyLeft) {
-		m.PanX -= m.MovementOffset[int(m.ZoomLevel)]
-		m.NeedUpdate = true
-	}
-
-	if rl.IsKeyDown(rl.KeyRight) {
-		m.PanX += m.MovementOffset[int(m.ZoomLevel)]
-		m.NeedUpdate = true
-	}
-
-	if rl.IsKeyDown(rl.KeyUp) {
-		m.PanY += m.MovementOffset[int(m.ZoomLevel)]
-		m.NeedUpdate = true
-	}
-
-	if rl.IsKeyDown(rl.KeyDown) {
-		m.PanY -= m.MovementOffset[int(m.ZoomLevel)]
-		m.NeedUpdate = true
-	}
-
-	if rl.IsKeyDown(rl.KeyA) {
-		m.ZoomLevel += 0.01
-		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel*3)
-		m.MaxIterations = 80 + 50*m.ZoomLevel
-		m.NeedUpdate = true
-	}
-
-	if rl.IsKeyDown(rl.KeyS) {
-		m.ZoomLevel -= 0.01
-		m.MagnificationFactor = 400 + math.Exp2(m.ZoomLevel*3)
-		m.MaxIterations = 80 + 50*m.ZoomLevel
-		m.NeedUpdate = true
-	}
 }
 
 func (m *Mandelbrot) ProcessRequestsFromMasterNode() {
