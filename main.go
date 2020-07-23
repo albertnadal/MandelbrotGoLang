@@ -56,6 +56,7 @@ type Mandelbrot struct {
 	MovementOffset           [16]float64
 	IsMaster                 bool
 	SlavePort                int32
+	SlavesIPs                []string
 	SlavesClients            []proto.MandelbrotSlaveNodeClient // Used only in 'master' mode
 	SlavesCount              int32
 	NodesProcessTimes        []time.Duration   // Array of processing times of each slave node and the master node (last value in the array)
@@ -154,9 +155,15 @@ func (m *Mandelbrot) Init(isMaster bool, slavesIPs []string) {
 	if m.IsMaster {
 		m.Canvas = rl.LoadRenderTexture(m.ScreenWidth, m.ScreenHeight)
 		m.SlavesCount = int32(len(slavesIPs))
+		m.SlavesIPs = make([]string, m.SlavesCount)
 		m.SlavesClients = make([]proto.MandelbrotSlaveNodeClient, m.SlavesCount)
 		m.NodesProcessTimes = make([]time.Duration, m.SlavesCount+1)        // processing times for each each slave and the master (last value in array)
 		m.NodesThreadsProcessTimes = make([][]time.Duration, m.SlavesCount) // thread processing times of all nodes in the cluster (slaves and master)
+
+		// This array stores all slaves IPs
+		for i := int32(0); i < m.SlavesCount; i++ {
+			m.SlavesIPs[i] = slavesIPs[i]
+		}
 
 		// This array stores all thread processing times of all slave nodes
 		for i := int32(0); i < m.SlavesCount; i++ {
@@ -263,7 +270,7 @@ func (m *Mandelbrot) Draw() {
 
 	// Show slave nodes threads processing times
 	for region_index := 0; region_index < len(m.NodesThreadsProcessTimes); region_index++ {
-		raygui.Label(rl.NewRectangle(float32(region_index+1)*160, 8, 40, float32(label_height)), fmt.Sprintf("NODE %d\n", region_index))
+		raygui.Label(rl.NewRectangle(float32(region_index+1)*160, 8, 40, float32(label_height)), fmt.Sprintf("NODE %d (%s)\n", region_index, m.SlavesIPs[region_index]))
 		for thread_index := 0; thread_index < len(m.NodesThreadsProcessTimes[region_index]); thread_index++ {
 			raygui.Label(rl.NewRectangle(float32(region_index+1)*160, float32(20+8+thread_index*(label_height+8)), 100, float32(label_height)), fmt.Sprintf("Thread %d: %s\n", thread_index, m.LocalThreadsProcessTimes[thread_index]))
 		}
